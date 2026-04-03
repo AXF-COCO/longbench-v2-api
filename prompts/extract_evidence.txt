@@ -1,0 +1,12 @@
+Please read the following text and extract the minimum verbatim evidence from the text that supports the answer to the question.
+
+<text>
+$DOC$
+</text>
+
+Question:
+$Q$
+
+Do not explain.
+Return only the exact quote(s) from the text as evidence.
+If multiple quotes are needed, put the most important one first.

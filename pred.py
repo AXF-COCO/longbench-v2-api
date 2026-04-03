@@ -8,119 +8,169 @@ from openai import OpenAI
 from transformers import AutoTokenizer
 import tiktoken
 import torch.multiprocessing as mp
+import random
+from collections import deque
 
-model_map = json.loads(open('config/model2path.json', encoding='utf-8').read())
+# TODO: change TPM_BUDGET as your API needs
+# request rate limit
+REQUEST_LOG = deque()
+TPM_BUDGET = 420000
+
+def estimate_tokens(text, model):
+    tokenizer = tiktoken.encoding_for_model(model)
+    return len(tokenizer.encode(text, disallowed_special=()))
+
+def throttle_if_needed(prompt, max_output_tokens, model):
+    """
+    Token-based throttle. Only works per process, which is fine if n_proc=1.
+    If the TPM is about to exceed the limit, sleep.
+    """
+    now = time.time()
+
+    while REQUEST_LOG and now - REQUEST_LOG[0][0] > 60:
+        REQUEST_LOG.popleft()
+
+    used = sum(x[1] for x in REQUEST_LOG)
+    need = estimate_tokens(prompt, model) + max_output_tokens
+
+    if used + need > TPM_BUDGET:
+        wait = 60 - (now - REQUEST_LOG[0][0]) + 1
+        time.sleep(max(1, wait))
+
+# TODO: add your model maxmium input token to 'config/model2maxlen.json'
+# Find out the acutal max input token of your API
+# Even though OpenAI states that GPT-5 supports 400,000 tokens, the actual max input token is 272,000 where the rest of the 400,000 is reserved for the maxmium possible output (128,000 tokens)
 maxlen_map = json.loads(open('config/model2maxlen.json', encoding='utf-8').read())
 
-URL = "http://127.0.0.1:8000/v1"
-API_KEY = "token-abc123"
-template_rag = open('prompts/0shot_rag.txt', encoding='utf-8').read()
-template_no_context = open('prompts/0shot_no_context.txt', encoding='utf-8').read()
-template_0shot = open('prompts/0shot.txt', encoding='utf-8').read()
-template_0shot_cot = open('prompts/0shot_cot.txt', encoding='utf-8').read()
-template_0shot_cot_ans = open('prompts/0shot_cot_ans.txt', encoding='utf-8').read()
+template_direct_answer = open('prompts/direct_answer.txt', encoding='utf-8').read()
+template_extract_evidence = open('prompts/extract_evidence.txt', encoding='utf-8').read()
+template_answer_from_evidence = open('prompts/answer_from_evidence.txt', encoding='utf-8').read()
 
-def query_llm(prompt, model, tokenizer, client=None, temperature=0.5, max_new_tokens=128, stop=None):
-    # truncate
-    max_len = maxlen_map[model]
-    if model in model_map:
-        input_ids = tokenizer.encode(prompt)
-        if len(input_ids) > max_len:
-            input_ids = input_ids[:max_len//2] + input_ids[-max_len//2:]
-            prompt = tokenizer.decode(input_ids, skip_special_tokens=True)
-    else:
-        input_ids = tokenizer.encode(prompt, disallowed_special=())
-        if len(input_ids) > max_len:
-            input_ids = input_ids[:max_len//2] + input_ids[-max_len//2:]
-            prompt = tokenizer.decode(input_ids)
-    tries = 0
-    if model in model_map:
-        model = model_map[model]
-    while tries < 5:
-        tries += 1
+# TODO: modify client if you need
+client = OpenAI()
+
+def call_llm(prompt, model, max_len, max_output_tokens, retries=5):
+    prompt = truncate_middle(prompt, model, max_len)
+    last_err = None
+    for attempt in range(retries):
         try:
-            completion = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
-                max_tokens=max_new_tokens,
-            )
-            return completion.choices[0].message.content
-        except KeyboardInterrupt as e:
-            raise e
-        except Exception as e:
-            print("Error Occurs: \"%s\"        Retry ..."%(str(e)))
-            time.sleep(1)
-    else:
-        print("Max tries. Failed.")
-        return ''
+            # 
+            throttle_if_needed(prompt, max_output_tokens, model)
 
-def extract_answer(response):
-    response = response.replace('*', '')
-    match = re.search(r'The correct answer is \(([A-D])\)', response)
-    if match:
-        return match.group(1)
-    else:
-        match = re.search(r'The correct answer is ([A-D])', response)
-        if match:
-            return match.group(1)
-        else:
-            return None
+            # TODO: modify response if you need
+            response = client.responses.create(
+                model=model,
+                input=prompt,
+                reasoning={"effort": "minimal"},
+                max_output_tokens=max_output_tokens
+            )
+
+            # add (time, token_used) to log
+            REQUEST_LOG.append((time.time(), estimate_tokens(prompt, model) + max_output_tokens))
+
+            return response.output_text or ""
+        except Exception as e:
+            print(e)
+            last_err = e
+
+            err_str = str(e)
+            if "rate_limit_exceeded" in err_str or "Error code: 429" in err_str:
+                sleep_s = min(30, (2 ** attempt) + random.random())
+                time.sleep(sleep_s)
+                continue
+
+            time.sleep(1)
+    raise RuntimeError(f'OpenAI call failed after {retries} retries: {last_err}')
+
+def build_direct_answer_prompt(item, doc_text):
+    return (
+        template_direct_answer
+        .replace('$DOC$', doc_text)
+        .replace('$Q$', item['question'].strip())
+        .replace('$C_A$', item['choice_A'].strip())
+        .replace('$C_B$', item['choice_B'].strip())
+        .replace('$C_C$', item['choice_C'].strip())
+        .replace('$C_D$', item['choice_D'].strip())
+    )
+
+def build_extract_evidence_prompt(item, doc_text):
+    return (
+        template_extract_evidence
+        .replace('$DOC$', doc_text)
+        .replace('$Q$', item['question'].strip())
+    )
+
+def build_answer_from_evidence_prompt(item, evidence_text):
+    return (
+        template_answer_from_evidence
+        .replace('$EVIDENCE$', evidence_text)
+        .replace('$Q$', item['question'].strip())
+        .replace('$C_A$', item['choice_A'].strip())
+        .replace('$C_B$', item['choice_B'].strip())
+        .replace('$C_C$', item['choice_C'].strip())
+        .replace('$C_D$', item['choice_D'].strip())
+    )
+
+
+DIRECT_RE = re.compile(r'^\s*"?The correct answer is \(([ABCD])\)"?\s*$', re.I | re.S)
+
+def extract_answer(text):
+    """
+    Parse the LLM output and extract a direct answer choice.
+
+    Args:
+        text (str): The raw output from the LLM
+
+    Returns:
+        tuple[str | None, bool]:
+            - The extracted answer (A, B, C, or D) if the pattern matches, otherwise None.
+            - A boolean indicating whether the LLM followed the expected output pattern.
+    """
+    m = DIRECT_RE.match(text.strip())
+    if not m:
+        return None, False
+    return m.group(1).upper(), True
+
+def truncate_middle(prompt, model, max_len):
+    tokenizer = tiktoken.encoding_for_model(model)
+    prompt = tokenizer.encode(prompt, disallowed_special=())
+    if len(prompt) > max_len:
+        prompt = prompt[:max_len // 2] + prompt[-max_len // 2:]
+    return tokenizer.decode(prompt)
 
 def get_pred(data, args, fout):
     model = args.model
-    if "gpt" in model or "o1" in model:
-        tokenizer = tiktoken.encoding_for_model("gpt-4o-2024-08-06")
-    else:
-        tokenizer = AutoTokenizer.from_pretrained(model_map[model], trust_remote_code=True)
-    client = OpenAI(
-        base_url=URL,
-        api_key=API_KEY
-    )
+    max_len = maxlen_map[model]
     for item in tqdm(data):
         context = item['context']
-        if args.rag > 0:
-            template = template_rag
-            retrieved = item["retrieved_context"][:args.rag]
-            retrieved = sorted(retrieved, key=lambda x: x['c_idx'])
-            context = '\n\n'.join([f"Retrieved chunk {idx+1}: {x['content']}" for idx, x in enumerate(retrieved)])
-        elif args.no_context:
-            template = template_no_context
-        elif args.cot:
-            template = template_0shot_cot
-        else:
-            template = template_0shot
-        prompt = template.replace('$DOC$', context.strip()).replace('$Q$', item['question'].strip()).replace('$C_A$', item['choice_A'].strip()).replace('$C_B$', item['choice_B'].strip()).replace('$C_C$', item['choice_C'].strip()).replace('$C_D$', item['choice_D'].strip())
-        if args.cot:
-            output = query_llm(prompt, model, tokenizer, client, temperature=0.1, max_new_tokens=1024)
-        else:
-            output = query_llm(prompt, model, tokenizer, client, temperature=0.1, max_new_tokens=128)
-        if output == '':
-            continue
-        if args.cot: # extract answer
-            response = output.strip()
-            item['response_cot'] = response
-            prompt = template_0shot_cot_ans.replace('$DOC$', context.strip()).replace('$Q$', item['question'].strip()).replace('$C_A$', item['choice_A'].strip()).replace('$C_B$', item['choice_B'].strip()).replace('$C_C$', item['choice_C'].strip()).replace('$C_D$', item['choice_D'].strip()).replace('$COT$', response)
-            output = query_llm(prompt, model, tokenizer, client, temperature=0.1, max_new_tokens=128)
-            if output == '':
-                continue
-        response = output.strip()
-        item['response'] = response
-        item['pred'] = extract_answer(response)
-        item['judge'] = item['pred'] == item['answer']
-        item['context'] = context[:1000]
+        if args.prompt_variant == 'extract_then_answer':
+            # extract
+            prompt_evidence = build_extract_evidence_prompt(item, context)
+            evidence = call_llm(prompt_evidence, model, max_len, args.evidence_max_output_tokens, args.retries)
+            item['evidence'] = evidence
+            # answer
+            prompt_answer = build_answer_from_evidence_prompt(item, evidence)
+            output = call_llm(prompt_answer, model, max_len, args.max_output_tokens, args.retries)
+            pred, follow_instruction = extract_answer(output)
+        else:  # args.prompt_variant == 'direct':
+            prompt = build_direct_answer_prompt(item, context)
+            output = call_llm(prompt, model, max_len, args.max_output_tokens, args.retries)
+            pred, follow_instruction = extract_answer(output)
+        item['output'] = output.strip()
+        item['pred'] = pred
+        item['follow_instruction'] = follow_instruction
+        item['judge'] = pred == item['answer']
+        item['context'] = item['context'][:1000]
         fout.write(json.dumps(item, ensure_ascii=False) + '\n')
         fout.flush()
 
 def main():
     os.makedirs(args.save_dir, exist_ok=True)
     print(args)
-    if args.rag > 0:
-        out_file = os.path.join(args.save_dir, args.model.split("/")[-1] + f"_rag_{str(args.rag)}.jsonl")
-    elif args.no_context:
-        out_file = os.path.join(args.save_dir, args.model.split("/")[-1] + "_no_context.jsonl")
-    elif args.cot:
-        out_file = os.path.join(args.save_dir, args.model.split("/")[-1] + "_cot.jsonl")
+    if args.prompt_variant == 'direct':
+        out_file = os.path.join(args.save_dir, args.model.split("/")[-1] + f"_direct.jsonl")
+    elif args.prompt_variant == 'extract_then_answer':
+        out_file = os.path.join(args.save_dir, args.model.split("/")[-1] + "_extract_then_answer.jsonl")
     else:
         out_file = os.path.join(args.save_dir, args.model.split("/")[-1] + ".jsonl")
 
@@ -147,13 +197,16 @@ def main():
     for p in processes:
         p.join()
 
+# TODO: change values if you need
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--save_dir", "-s", type=str, default="results")
-    parser.add_argument("--model", "-m", type=str, default="GLM-4-9B-Chat")
-    parser.add_argument("--cot", "-cot", action='store_true') # set to True if using COT
-    parser.add_argument("--no_context", "-nc", action='store_true') # set to True if using no context (directly measuring memorization)
-    parser.add_argument("--rag", "-rag", type=int, default=0) # set to 0 if RAG is not used, otherwise set to N when using top-N retrieved context
-    parser.add_argument("--n_proc", "-n", type=int, default=16)
+    parser.add_argument("--model", "-m", type=str, default="gpt-5-mini")
+    parser.add_argument('--prompt_variant', type=str, default='direct', choices=['direct', 'extract_then_answer'])
+    parser.add_argument('--max_output_tokens', type=int, default=64)
+    parser.add_argument('--evidence_max_output_tokens', type=int, default=256)
+    parser.add_argument('--retries', type=int, default=5)
+    # Note: n must be set to 1, since we need TPM controller only works per process
+    parser.add_argument("--n_proc", "-n", type=int, default=1)
     args = parser.parse_args()
     main()

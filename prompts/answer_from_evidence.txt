@@ -1,7 +1,7 @@
-Please read the following retrieved text chunks and answer the question below.
+Please read the following text and answer the question below.
 
 <text>
-$DOC$
+$EVIDENCE$
 </text>
 
 What is the correct answer to this question: $Q$

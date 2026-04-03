@@ -1,0 +1,144 @@
+# =====================
+# OS generated files
+# =====================
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# =====================
+# Editor / IDE
+# =====================
+.vscode/
+.idea/
+*.suo
+*.user
+*.userossc
+*.sln.docstates
+*.swp
+*.swo
+*~
+
+# =====================
+# Logs
+# =====================
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# =====================
+# Environment variables / secrets
+# =====================
+.env
+.env.*
+!.env.example
+
+# =====================
+# Dependencies
+# =====================
+node_modules/
+vendor/
+dist/
+build/
+out/
+coverage/
+
+# =====================
+# Python
+# =====================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.hypothesis/
+.ipynb_checkpoints/
+
+# =====================
+# Java / Kotlin / Gradle
+# =====================
+*.class
+*.jar
+*.war
+*.ear
+.gradle/
+target/
+
+# =====================
+# Go
+# =====================
+bin/
+*.test
+
+# =====================
+# Rust
+# =====================
+target/
+Cargo.lock
+
+# =====================
+# PHP / Composer
+# =====================
+/vendor/
+
+# =====================
+# .NET
+# =====================
+bin/
+obj/
+*.rsuser
+*.suo
+
+# =====================
+# C / C++ / CMake
+# =====================
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+Makefile
+makedep*
+libtool
+aclocal.m4
+m4/
+autom4te.cache/
+
+# =====================
+# Docker / deployment
+# =====================
+docker-compose.override.yml
+*.pid
+
+# =====================
+# Archives / packaged files
+# =====================
+*.zip
+*.tar
+*.gz
+*.tgz
+*.bz2
+*.7z
+*.rar
+
+# =====================
+# Temporary files
+# =====================
+*.tmp
+*.temp
+tmp/
+temp/
+
+# =====================
+# Project
+# =====================
+results/
+result.tsv
