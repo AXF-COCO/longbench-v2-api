@@ -1,86 +1,37 @@
-import os, csv, json
+from __future__ import annotations
+
+import os, csv, json, yaml
 import argparse
 import time
 from tqdm import tqdm
 from datasets import load_dataset
 import re
-from openai import OpenAI
-from transformers import AutoTokenizer
-import tiktoken
 import torch.multiprocessing as mp
 import random
-from collections import deque
 
-# TODO: change TPM_BUDGET as your API needs
-# request rate limit
-REQUEST_LOG = deque()
-TPM_BUDGET = 420000
+from providers import OpenAIProvider, GeminiProvider
 
-def estimate_tokens(text, model):
-    tokenizer = tiktoken.encoding_for_model(model)
-    return len(tokenizer.encode(text, disallowed_special=()))
+MODEL_MAXLEN_PATH = "config/model2maxlen.yaml"
+API_KEY_NAME_PATH = "config/api_key_name.yaml"
+DIRECT_PROMPT_PATH = "prompts/direct_answer.txt"
+EXTRACT_PROMPT_PATH = "prompts/extract_evidence.txt"
+ANSWER_FROM_EVIDENCE_PROMPT_PATH = "prompts/answer_from_evidence.txt"
 
-def throttle_if_needed(prompt, max_output_tokens, model):
-    """
-    Token-based throttle. Only works per process, which is fine if n_proc=1.
-    If the TPM is about to exceed the limit, sleep.
-    """
-    now = time.time()
+def load_yaml(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
-    while REQUEST_LOG and now - REQUEST_LOG[0][0] > 60:
-        REQUEST_LOG.popleft()
+model2maxlen = load_yaml(MODEL_MAXLEN_PATH)
+default_api_key_name = load_yaml(API_KEY_NAME_PATH)
 
-    used = sum(x[1] for x in REQUEST_LOG)
-    need = estimate_tokens(prompt, model) + max_output_tokens
+def load_text(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
 
-    if used + need > TPM_BUDGET:
-        wait = 60 - (now - REQUEST_LOG[0][0]) + 1
-        time.sleep(max(1, wait))
+template_direct_answer = load_text(DIRECT_PROMPT_PATH)
+template_extract_evidence = load_text(EXTRACT_PROMPT_PATH)
+template_answer_from_evidence = load_text(ANSWER_FROM_EVIDENCE_PROMPT_PATH)
 
-# TODO: add your model maxmium input token to 'config/model2maxlen.json'
-# Find out the acutal max input token of your API
-# Even though OpenAI states that GPT-5 supports 400,000 tokens, the actual max input token is 272,000 where the rest of the 400,000 is reserved for the maxmium possible output (128,000 tokens)
-maxlen_map = json.loads(open('config/model2maxlen.json', encoding='utf-8').read())
-
-template_direct_answer = open('prompts/direct_answer.txt', encoding='utf-8').read()
-template_extract_evidence = open('prompts/extract_evidence.txt', encoding='utf-8').read()
-template_answer_from_evidence = open('prompts/answer_from_evidence.txt', encoding='utf-8').read()
-
-# TODO: modify client if you need
-client = OpenAI()
-
-def call_llm(prompt, model, max_len, max_output_tokens, retries=5):
-    prompt = truncate_middle(prompt, model, max_len)
-    last_err = None
-    for attempt in range(retries):
-        try:
-            # 
-            throttle_if_needed(prompt, max_output_tokens, model)
-
-            # TODO: modify response if you need
-            response = client.responses.create(
-                model=model,
-                input=prompt,
-                reasoning={"effort": "minimal"},
-                max_output_tokens=max_output_tokens
-            )
-
-            # add (time, token_used) to log
-            REQUEST_LOG.append((time.time(), estimate_tokens(prompt, model) + max_output_tokens))
-
-            return response.output_text or ""
-        except Exception as e:
-            print(e)
-            last_err = e
-
-            err_str = str(e)
-            if "rate_limit_exceeded" in err_str or "Error code: 429" in err_str:
-                sleep_s = min(30, (2 ** attempt) + random.random())
-                time.sleep(sleep_s)
-                continue
-
-            time.sleep(1)
-    raise RuntimeError(f'OpenAI call failed after {retries} retries: {last_err}')
 
 def build_direct_answer_prompt(item, doc_text):
     return (
@@ -131,31 +82,50 @@ def extract_answer(text):
         return None, False
     return m.group(1).upper(), True
 
-def truncate_middle(prompt, model, max_len):
-    tokenizer = tiktoken.encoding_for_model(model)
-    prompt = tokenizer.encode(prompt, disallowed_special=())
-    if len(prompt) > max_len:
-        prompt = prompt[:max_len // 2] + prompt[-max_len // 2:]
-    return tokenizer.decode(prompt)
+def build_provider(args, api_key: str):
+    if args.provider == 'openai':
+        return OpenAIProvider(
+            model=args.model,
+            max_input_tokens=args.max_input_tokens,
+            tpm_budget=args.tpm_budget,
+            retries=args.retries,
+            api_key=api_key,
+            base_url=args.base_url
+        )
+    if args.provider == 'gemini':
+        return GeminiProvider(
+            model=args.model,
+            max_input_tokens=args.max_input_tokens,
+            tpm_budget=args.tpm_budget,
+            retries=args.retries,
+            temperature=args.temperature
+        )
+    raise ValueError(f'Unknown provider: {args.provider}')
 
 def get_pred(data, args, fout):
-    model = args.model
-    max_len = maxlen_map[model]
+    # get api_key in the env (not store in args for safety)
+    api_key = os.getenv(args.api_key_name)
+    if not api_key:
+        raise ValueError(f'api_key not found under api_key_name {args.api_key_name}.')
+    provider = build_provider(args, api_key)
+
     for item in tqdm(data):
         context = item['context']
         if args.prompt_variant == 'extract_then_answer':
             # extract
             prompt_evidence = build_extract_evidence_prompt(item, context)
-            evidence = call_llm(prompt_evidence, model, max_len, args.evidence_max_output_tokens, args.retries)
+            evidence = provider.generate(prompt_evidence, args.evidence_max_output_tokens)
             item['evidence'] = evidence
             # answer
             prompt_answer = build_answer_from_evidence_prompt(item, evidence)
-            output = call_llm(prompt_answer, model, max_len, args.max_output_tokens, args.retries)
+            output = provider.generate(prompt_answer, args.max_output_tokens)
             pred, follow_instruction = extract_answer(output)
-        else:  # args.prompt_variant == 'direct':
+        elif args.prompt_variant == 'direct':
             prompt = build_direct_answer_prompt(item, context)
-            output = call_llm(prompt, model, max_len, args.max_output_tokens, args.retries)
+            output = provider.generate(prompt, args.max_output_tokens)
             pred, follow_instruction = extract_answer(output)
+        else:
+            raise ValueError('not valid prompt.')
         item['output'] = output.strip()
         item['pred'] = pred
         item['follow_instruction'] = follow_instruction
@@ -165,14 +135,12 @@ def get_pred(data, args, fout):
         fout.flush()
 
 def main():
-    os.makedirs(args.save_dir, exist_ok=True)
-    print(args)
     if args.prompt_variant == 'direct':
         out_file = os.path.join(args.save_dir, args.model.split("/")[-1] + f"_direct.jsonl")
     elif args.prompt_variant == 'extract_then_answer':
         out_file = os.path.join(args.save_dir, args.model.split("/")[-1] + "_extract_then_answer.jsonl")
     else:
-        out_file = os.path.join(args.save_dir, args.model.split("/")[-1] + ".jsonl")
+        raise ValueError('not valid prompt.')
 
     dataset = load_dataset('THUDM/LongBench-v2', split='train') # dataset = json.load(open('data.json', 'r', encoding='utf-8'))
     data_all = [{"_id": item["_id"], "domain": item["domain"], "sub_domain": item["sub_domain"], "difficulty": item["difficulty"], "length": item["length"], "question": item["question"], "choice_A": item["choice_A"], "choice_B": item["choice_B"], "choice_C": item["choice_C"], "choice_D": item["choice_D"], "answer": item["answer"], "context": item["context"]} for item in dataset]
@@ -197,16 +165,39 @@ def main():
     for p in processes:
         p.join()
 
-# TODO: change values if you need
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    # which library you want to use while sending the request
+    parser.add_argument("--provider", "-p", type=str, choices=list(default_api_key_name.keys()), required=True)
+    parser.add_argument("--model", "-m", type=str, required=True)
     parser.add_argument("--save_dir", "-s", type=str, default="results")
-    parser.add_argument("--model", "-m", type=str, default="gpt-5-mini")
     parser.add_argument('--prompt_variant', type=str, default='direct', choices=['direct', 'extract_then_answer'])
-    parser.add_argument('--max_output_tokens', type=int, default=64)
-    parser.add_argument('--evidence_max_output_tokens', type=int, default=256)
+    parser.add_argument('--max_output_tokens', type=int, default=128)
+    parser.add_argument('--evidence_max_output_tokens', type=int, default=512)
     parser.add_argument('--retries', type=int, default=5)
+    parser.add_argument('--temperature', type=float, default=0.0)
+    parser.add_argument('--tpm_budget', type=int, default=1000000)
+    parser.add_argument('--api_key_name', type=str, default=None)
+    parser.add_argument('--base_url', type=str, default=None)
     # Note: n must be set to 1, since we need TPM controller only works per process
     parser.add_argument("--n_proc", "-n", type=int, default=1)
     args = parser.parse_args()
+
+    # check num of process
+    if args.n_proc != 1:
+        print('Warning: this version is sequential. Use --n_proc 1 for reliable tpm limit handling.')
+    
+    # check directory
+    os.makedirs(args.save_dir, exist_ok=True)
+
+    # get model's max_input_tokens
+    if args.model not in model2maxlen:
+        raise KeyError(f'model {args.model} not found in {MODEL_MAXLEN_PATH}')
+    args.max_input_tokens = model2maxlen[args.model]
+
+    # get default api_key_name if it is not set
+    if args.api_key_name is None:
+        args.api_key_name = default_api_key_name[args.provider]
+    
+    print(args)
     main()

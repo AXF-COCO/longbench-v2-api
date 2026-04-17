@@ -28,21 +28,24 @@ pip install -r requirements.txt
 
 ### 2. Set environment variables
 ```bash
-export OPENAI_API_KEY="your_key"
+export YOUR_API_KEY="your_key"
 ```
 If you use a different provider, you should modify the client initialization in `pred.py`.
 
 ## Usage
 #### 1. Run inference
 ```bash
-python pred.py -m your_model_name --prompt_variant direct
-python pred.py -m your_model_name --prompt_variant extract_then_answer
+python pred.py -p your_provider -m your_model_name --prompt_variant direct --api_key_name YOUR_API_KEY
+python pred.py -p your_provider -m your_model_name --prompt_variant extract_then_answer --api_key_name YOUR_API_KEY
 ```
 **Notes:**
-- `-m` / `--model` should match the model name configured in `config/model2maxlen.json`
+- `p` should correspond the library you want to use when sending request
+- `-m` / `--model` should match the model name configured in `config/model2maxlen.yaml`
 - `--prompt_variant` supports:
   - `direct`
   - `extract_then_answer`
+- `--api_key_name` should be the name your exported in env
+  > default api_key_name is set in api_key_name.yaml
 - `-n` / `--n_proc` should stay `1`
 
 #### 2. Evaluate results
@@ -69,8 +72,8 @@ pip install -r requirements.txt
 
 export OPENAI_API_KEY="abcde"
 
-python pred.py -m gpt-5-mini --prompt_variant extract_then_answer
-python pred.py -m gpt-5-mini --prompt_variant direct
+python pred.py -p openai -m gpt-5-mini --prompt_variant direct
+python pred.py -p openai -m gpt-5-mini --prompt_variant extract_then_answer
 
 python result.py
 ```
