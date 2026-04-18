@@ -62,9 +62,6 @@ def build_answer_from_evidence_prompt(item, evidence_text):
         .replace('$C_D$', item['choice_D'].strip())
     )
 
-
-DIRECT_RE = re.compile(r'^\s*"?The correct answer is \(([ABCD])\)"?\s*$', re.I | re.S)
-
 def extract_answer(text):
     """
     Parse the LLM output and extract a direct answer choice.
@@ -77,10 +74,14 @@ def extract_answer(text):
             - The extracted answer (A, B, C, or D) if the pattern matches, otherwise None.
             - A boolean indicating whether the LLM followed the expected output pattern.
     """
-    m = DIRECT_RE.match(text.strip())
-    if not m:
-        return None, False
-    return m.group(1).upper(), True
+    text = text.replace('*', '')
+    m = re.search(r'The correct answer is \(([A-D])\)', text)
+    if m:
+        return m.group(1), True
+    m = re.search(r'The correct answer is ([A-D])', text)
+    if m:
+        return m.group(1), True
+    return None, False
 
 def build_provider(args, api_key: str):
     if args.provider == 'openai':
