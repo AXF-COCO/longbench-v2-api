@@ -9,11 +9,7 @@ It currently supports two prompting strategies:
 - **direct**: answer the question directly from the full context
 - **extract_then_answer**: first extract evidence, then answer from the extracted evidence
 
-To keep the request rate under control, this implementation is currently designed for **single-process execution**. Please keep `-n 1` when running inference.
-
 This is a work-in-progress version and is not yet fully generalized.
-
-If you use a different API provider, you may also need to modify the client initialization, request method, response parsing, and token counting logic in `pred.py`, in addition to the `TODO` sections.
 
 ---
 
@@ -46,7 +42,6 @@ python pred.py -p your_provider -m your_model_name --prompt_variant extract_then
   - `extract_then_answer`
 - `--api_key_name` should be the name your exported in env
   > default api_key_name is set in api_key_name.yaml
-- `-n` / `--n_proc` should stay `1`
 
 #### 2. Evaluate results
 ```bash

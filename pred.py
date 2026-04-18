@@ -157,14 +157,7 @@ def main():
         if item["_id"] not in has_data:
             data.append(item)
 
-    data_subsets = [data[i::args.n_proc] for i in range(args.n_proc)]
-    processes = []
-    for rank in range(args.n_proc):
-        p = mp.Process(target=get_pred, args=(data_subsets[rank], args, fout))
-        p.start()
-        processes.append(p)
-    for p in processes:
-        p.join()
+    get_pred(data, args, fout)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -177,16 +170,10 @@ if __name__ == "__main__":
     parser.add_argument('--evidence_max_output_tokens', type=int, default=512)
     parser.add_argument('--retries', type=int, default=5)
     parser.add_argument('--temperature', type=float, default=0.0)
-    parser.add_argument('--tpm_budget', type=int, default=1000000)
+    parser.add_argument('--tpm_budget', type=int, default=1500000)
     parser.add_argument('--api_key_name', type=str, default=None)
     parser.add_argument('--base_url', type=str, default=None)
-    # Note: n must be set to 1, since we need TPM controller only works per process
-    parser.add_argument("--n_proc", "-n", type=int, default=1)
     args = parser.parse_args()
-
-    # check num of process
-    if args.n_proc != 1:
-        print('Warning: this version is sequential. Use --n_proc 1 for reliable tpm limit handling.')
     
     # check directory
     os.makedirs(args.save_dir, exist_ok=True)
